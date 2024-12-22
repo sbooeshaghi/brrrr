@@ -116,6 +116,9 @@ enum Brrrr {
         /// The compression mode for the parquet.
         #[clap(value_enum, default_value = "uncompressed")]
         compression: ParquetCompression,
+        /// The bio file compression for the input FASTQ file.
+        #[clap(short, long, value_enum, default_value = "uncompressed")]
+        input_compression: CliBioFileCompression,
     },
     #[clap(name = "fa2jsonl", about = "Converts a FASTA input to jsonl.")]
     Fa2jsonl {
@@ -187,7 +190,13 @@ fn main() -> Result<(), BrrrrError> {
             input_file_name,
             output_file_name,
             compression,
-        } => parquet_writer::fq2pq(input_file_name, output_file_name, compression.into()),
+            input_compression,
+        } => parquet_writer::fq2pq(
+            input_file_name,
+            output_file_name,
+            compression.into(),
+            input_compression.into(),
+        ),
         Brrrr::Fa2csv { input } => match input {
             None => csv_writer::fa2csv(stdin().lock(), &mut stdout()),
             Some(input) => {
@@ -202,12 +211,14 @@ fn main() -> Result<(), BrrrrError> {
                 csv_writer::fq2csv(BufReader::new(f), &mut stdout())
             }
         },
-        Brrrr::Bam2jsonl { input } => if let Some(input) = input {
-            let f = File::open(input)?;
-            json_writer::bam2jsonl(BufReader::new(f), &mut stdout())
-        } else {
-            json_writer::bam2jsonl(stdin().lock(), &mut stdout())
-        },
+        Brrrr::Bam2jsonl { input } => {
+            if let Some(input) = input {
+                let f = File::open(input)?;
+                json_writer::bam2jsonl(BufReader::new(f), &mut stdout())
+            } else {
+                json_writer::bam2jsonl(stdin().lock(), &mut stdout())
+            }
+        }
         Brrrr::Fa2jsonl { input } => match input {
             None => json_writer::fa2jsonl(stdin().lock(), &mut stdout()),
             Some(input) => {

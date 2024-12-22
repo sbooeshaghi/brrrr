@@ -254,17 +254,18 @@ pub fn fa2pq<P: AsRef<Path>>(
         }
     }
 }
-
 /// Converts a FASTQ file to Parquet.
 ///
 /// # Arguments
-/// * `input` The string representing the path to the input fasta file.
-/// * `output` The string representing the path to the output parquet file.
-/// * `parquet_compression` The parquet compression to use.
+/// * `input` The path to the input FASTQ file.
+/// * `output` The path to the output Parquet file.
+/// * `parquet_compression` The Parquet compression to use.
+/// * `bio_file_compression` The compression type for the input FASTQ file.
 pub fn fq2pq<P: AsRef<Path>>(
     input: P,
     output: P,
     parquet_compression: Compression,
+    bio_file_compression: BioFileCompression,
 ) -> Result<(), BrrrrError> {
     let file_schema = Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -277,68 +278,88 @@ pub fn fq2pq<P: AsRef<Path>>(
         .set_compression(parquet_compression)
         .set_statistics_enabled(true);
 
-    let input_file = fs::File::open(input).expect("Error opening file.");
-    let mut reader = fastq::Reader::new(BufReader::new(input_file));
+    // Abstract reader for both compressed and uncompressed files
+    let reader: Box<dyn std::io::Read> = match bio_file_compression {
+        BioFileCompression::GZIP => {
+            let file = fs::File::open(input)?;
+            let gz = GzDecoder::new(BufReader::new(file));
+            Box::new(gz)
+        }
+        BioFileCompression::UNCOMPRESSED => {
+            let file = fs::File::open(input)?;
+            Box::new(file)
+        }
+    };
 
-    let records = reader.records();
+    let mut fastq_reader = fastq::Reader::new(BufReader::new(reader));
+    let records = fastq_reader.records();
 
+    // Write to the Parquet file
     let file = fs::File::create(output)?;
     let mut writer =
         ArrowWriter::try_new(file, Arc::new(file_schema.clone()), Some(props.build()))?;
-
     let chunk_size = 2usize.pow(20);
+    let mut id_builder = StringBuilder::new(2048);
+    let mut description_builder = StringBuilder::new(2048);
+    let mut seq_builder = StringBuilder::new(2048);
+    let mut quality_builder = StringBuilder::new(2048);
+
     for chunk in records.into_iter().chunks(chunk_size).into_iter() {
-        let mut id_builder = StringBuilder::new(2048);
-        let mut description_builder = StringBuilder::new(2048);
-        let mut seq_builder = StringBuilder::new(2048);
-        let mut quality_builder = StringBuilder::new(2048);
-
         for chunk_i in chunk {
-            let record = match chunk_i {
-                Ok(r) => r,
-                Err(error) => panic!("{}", error),
-            };
+            match chunk_i {
+                Ok(record) => {
+                    let fastq_record = FastqRecord::from(record);
+                    println!("Processing record: {:?}", fastq_record.id);
 
-            let fastq_record = FastqRecord::from(record);
-
-            id_builder
-                .append_value(fastq_record.id)
-                .expect("Couldn't append id.");
-
-            match fastq_record.description {
-                Some(x) => description_builder
-                    .append_value(x)
-                    .expect("Couldn't append description."),
-                _ => description_builder
-                    .append_null()
-                    .expect("Couldn't append null description."),
+                    id_builder.append_value(fastq_record.id)?;
+                    match fastq_record.description {
+                        Some(x) => description_builder.append_value(x)?,
+                        None => description_builder.append_null()?,
+                    }
+                    seq_builder.append_value(fastq_record.sequence)?;
+                    quality_builder.append_value(fastq_record.quality)?;
+                }
+                Err(e) => {
+                    eprintln!("Error reading record: {}", e);
+                    return Err(e.into());
+                }
             }
-
-            seq_builder
-                .append_value(fastq_record.sequence)
-                .expect("Couldn't add sequence.");
-
-            quality_builder
-                .append_value(fastq_record.quality)
-                .expect("Couldn't add sequence.");
         }
 
-        let id_array = id_builder.finish();
-        let desc_array = description_builder.finish();
-        let seq_array = seq_builder.finish();
-        let quality_array = quality_builder.finish();
+        // Check if we have records to process before finalizing the batch
+        if id_builder.len() > 0 {
+            println!("batch len {}", id_builder.len());
+            let id_array = id_builder.finish();
+            let desc_array = description_builder.finish();
+            let seq_array = seq_builder.finish();
+            let quality_array = quality_builder.finish();
+            // print len of each array
+            println!(
+                "id_array len: {}, desc_array len: {}, seq_array len: {}, quality_array len: {}",
+                id_array.len(),
+                desc_array.len(),
+                seq_array.len(),
+                quality_array.len()
+            );
 
-        let rb = RecordBatch::try_new(
-            Arc::new(file_schema.clone()),
-            vec![
-                Arc::new(id_array),
-                Arc::new(seq_array),
-                Arc::new(desc_array),
-                Arc::new(quality_array),
-            ],
-        )?;
+            let rb = RecordBatch::try_new(
+                Arc::new(file_schema.clone()),
+                vec![
+                    Arc::new(id_array),
+                    Arc::new(seq_array),
+                    Arc::new(desc_array),
+                    Arc::new(quality_array),
+                ],
+            )?;
 
-        writer.write(&rb)?;
+            writer.write(&rb)?;
+
+            // Reset builders for the next chunk
+            id_builder = StringBuilder::new(2048);
+            description_builder = StringBuilder::new(2048);
+            seq_builder = StringBuilder::new(2048);
+            quality_builder = StringBuilder::new(2048);
+        }
     }
 
     writer.close()?;
