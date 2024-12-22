@@ -272,6 +272,7 @@ pub fn fq2pq<P: AsRef<Path>>(
         Field::new("sequence", DataType::Utf8, false),
         Field::new("description", DataType::Utf8, true),
         Field::new("quality", DataType::Utf8, false),
+        Field::new("number", DataType::Int64, true),
     ]);
 
     let props = WriterProperties::builder()
@@ -303,13 +304,16 @@ pub fn fq2pq<P: AsRef<Path>>(
     let mut description_builder = StringBuilder::new(2048);
     let mut seq_builder = StringBuilder::new(2048);
     let mut quality_builder = StringBuilder::new(2048);
+    let mut read_number_builder = Int64Builder::new(2048);
+
+    let mut read_number = 0;
 
     for chunk in records.into_iter().chunks(chunk_size).into_iter() {
         for chunk_i in chunk {
             match chunk_i {
                 Ok(record) => {
                     let fastq_record = FastqRecord::from(record);
-                    println!("Processing record: {:?}", fastq_record.id);
+                    // println!("Processing record: {:?}", fastq_record.id);
 
                     id_builder.append_value(fastq_record.id)?;
                     match fastq_record.description {
@@ -318,6 +322,8 @@ pub fn fq2pq<P: AsRef<Path>>(
                     }
                     seq_builder.append_value(fastq_record.sequence)?;
                     quality_builder.append_value(fastq_record.quality)?;
+                    read_number_builder.append_value(read_number)?;
+                    read_number += 1;
                 }
                 Err(e) => {
                     eprintln!("Error reading record: {}", e);
@@ -333,6 +339,7 @@ pub fn fq2pq<P: AsRef<Path>>(
             let desc_array = description_builder.finish();
             let seq_array = seq_builder.finish();
             let quality_array = quality_builder.finish();
+            let read_number_array = read_number_builder.finish();
             // print len of each array
             println!(
                 "id_array len: {}, desc_array len: {}, seq_array len: {}, quality_array len: {}",
@@ -349,6 +356,7 @@ pub fn fq2pq<P: AsRef<Path>>(
                     Arc::new(seq_array),
                     Arc::new(desc_array),
                     Arc::new(quality_array),
+                    Arc::new(read_number_array),
                 ],
             )?;
 
